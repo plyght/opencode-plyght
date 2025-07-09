@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/v2/viewport"
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss/v2"
+	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode/internal/styles"
 	"github.com/sst/opencode/internal/theme"
 	"github.com/sst/opencode/internal/util"
@@ -16,9 +17,10 @@ type PermissionAction string
 
 // Permission responses
 const (
-	PermissionAllow           PermissionAction = "allow"
-	PermissionAllowForSession PermissionAction = "allow_session"
-	PermissionDeny            PermissionAction = "deny"
+	PermissionAllow          PermissionAction = "once"
+	PermissionAllowDirectory PermissionAction = "always_directory"
+	PermissionAllowSession   PermissionAction = "always_session"
+	PermissionDeny           PermissionAction = "reject"
 )
 
 // PermissionResponseMsg represents the user's response to a permission request
@@ -31,7 +33,7 @@ type PermissionResponseMsg struct {
 type PermissionDialogComponent interface {
 	tea.Model
 	tea.ViewModel
-	// SetPermissions(permission permission.PermissionRequest) tea.Cmd
+	SetPermission(permission *opencode.EventListResponseEventPermissionUpdated) tea.Cmd
 }
 
 type permissionsMapping struct {
@@ -42,6 +44,7 @@ type permissionsMapping struct {
 	AllowSession key.Binding
 	Deny         key.Binding
 	Tab          key.Binding
+	Escape       key.Binding
 }
 
 var permissionsKeys = permissionsMapping{
@@ -73,13 +76,17 @@ var permissionsKeys = permissionsMapping{
 		key.WithKeys("tab"),
 		key.WithHelp("tab", "switch options"),
 	),
+	Escape: key.NewBinding(
+		key.WithKeys("esc"),
+		key.WithHelp("esc", "cancel"),
+	),
 }
 
 // permissionDialogComponent is the implementation of PermissionDialog
 type permissionDialogComponent struct {
-	width  int
-	height int
-	// permission      permission.PermissionRequest
+	width           int
+	height          int
+	permission      *opencode.EventListResponseEventPermissionUpdated
 	windowSize      tea.WindowSizeMsg
 	contentViewPort viewport.Model
 	selectedOption  int // 0: Allow, 1: Allow for session, 2: Deny
@@ -102,27 +109,23 @@ func (p *permissionDialogComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 		p.markdownCache = make(map[string]string)
 		p.diffCache = make(map[string]string)
-		// case tea.KeyMsg:
-		// 	switch {
-		// 	case key.Matches(msg, permissionsKeys.Right) || key.Matches(msg, permissionsKeys.Tab):
-		// 		p.selectedOption = (p.selectedOption + 1) % 3
-		// 		return p, nil
-		// 	case key.Matches(msg, permissionsKeys.Left):
-		// 		p.selectedOption = (p.selectedOption + 2) % 3
-		// 	case key.Matches(msg, permissionsKeys.EnterSpace):
-		// 		return p, p.selectCurrentOption()
-		// 	case key.Matches(msg, permissionsKeys.Allow):
-		// 		return p, util.CmdHandler(PermissionResponseMsg{Action: PermissionAllow, Permission: p.permission})
-		// 	case key.Matches(msg, permissionsKeys.AllowSession):
-		// 		return p, util.CmdHandler(PermissionResponseMsg{Action: PermissionAllowForSession, Permission: p.permission})
-		// 	case key.Matches(msg, permissionsKeys.Deny):
-		// 		return p, util.CmdHandler(PermissionResponseMsg{Action: PermissionDeny, Permission: p.permission})
-		// 	default:
-		// 		// Pass other keys to viewport
-		// 		viewPort, cmd := p.contentViewPort.Update(msg)
-		// 		p.contentViewPort = viewPort
-		// 		cmds = append(cmds, cmd)
-		// 	}
+	case tea.KeyMsg:
+		switch {
+		case key.Matches(msg, permissionsKeys.Right) || key.Matches(msg, permissionsKeys.Tab):
+			p.selectedOption = (p.selectedOption + 1) % 3
+			return p, nil
+		case key.Matches(msg, permissionsKeys.Left):
+			p.selectedOption = (p.selectedOption + 2) % 3
+		case key.Matches(msg, permissionsKeys.EnterSpace):
+			return p, p.selectCurrentOption()
+		case key.Matches(msg, permissionsKeys.Escape):
+			return p, util.CmdHandler(PermissionResponseMsg{Action: PermissionDeny})
+		default:
+			// Pass other keys to viewport
+			viewPort, cmd := p.contentViewPort.Update(msg)
+			p.contentViewPort = viewPort
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return p, tea.Batch(cmds...)
@@ -135,7 +138,7 @@ func (p *permissionDialogComponent) selectCurrentOption() tea.Cmd {
 	case 0:
 		action = PermissionAllow
 	case 1:
-		action = PermissionAllowForSession
+		action = PermissionAllowDirectory
 	case 2:
 		action = PermissionDeny
 	}
@@ -168,9 +171,9 @@ func (p *permissionDialogComponent) renderButtons() string {
 		denyStyle = denyStyle.Background(t.Primary()).Foreground(t.Background())
 	}
 
-	allowButton := allowStyle.Padding(0, 1).Render("Allow (a)")
-	allowSessionButton := allowSessionStyle.Padding(0, 1).Render("Allow for session (s)")
-	denyButton := denyStyle.Padding(0, 1).Render("Deny (d)")
+	allowButton := allowStyle.Padding(0, 1).Render("Yes")
+	allowSessionButton := allowSessionStyle.Padding(0, 1).Render("Yes, don't ask again in this directory")
+	denyButton := denyStyle.Padding(0, 1).Render("No, tell OpenCode what to do differently")
 
 	content := lipgloss.JoinHorizontal(
 		lipgloss.Left,
@@ -190,166 +193,189 @@ func (p *permissionDialogComponent) renderButtons() string {
 }
 
 func (p *permissionDialogComponent) renderHeader() string {
-	return "NOT IMPLEMENTED"
-	// t := theme.CurrentTheme()
-	// baseStyle := styles.BaseStyle()
-	//
-	// toolKey := baseStyle.Foreground(t.TextMuted()).Bold(true).Render("Tool")
-	// toolValue := baseStyle.
-	// 	Foreground(t.Text()).
-	// 	Width(p.width - lipgloss.Width(toolKey)).
-	// 	Render(fmt.Sprintf(": %s", p.permission.ToolName))
-	//
-	// pathKey := baseStyle.Foreground(t.TextMuted()).Bold(true).Render("Path")
-	//
-	// // Get the current working directory to display relative path
-	// relativePath := p.permission.Path
-	// if filepath.IsAbs(relativePath) {
-	// 	if cwd, err := filepath.Rel(config.WorkingDirectory(), relativePath); err == nil {
-	// 		relativePath = cwd
-	// 	}
-	// }
-	//
-	// pathValue := baseStyle.
-	// 	Foreground(t.Text()).
-	// 	Width(p.width - lipgloss.Width(pathKey)).
-	// 	Render(fmt.Sprintf(": %s", relativePath))
-	//
-	// headerParts := []string{
-	// 	lipgloss.JoinHorizontal(
-	// 		lipgloss.Left,
-	// 		toolKey,
-	// 		toolValue,
-	// 	),
-	// 	baseStyle.Render(strings.Repeat(" ", p.width)),
-	// 	lipgloss.JoinHorizontal(
-	// 		lipgloss.Left,
-	// 		pathKey,
-	// 		pathValue,
-	// 	),
-	// 	baseStyle.Render(strings.Repeat(" ", p.width)),
-	// }
-	//
-	// // Add tool-specific header information
-	// switch p.permission.ToolName {
-	// case "bash":
-	// 	headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("Command"))
-	// case "edit":
-	// 	headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("Diff"))
-	// case "write":
-	// 	headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("Diff"))
-	// case "fetch":
-	// 	headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("URL"))
-	// }
-	//
-	// return lipgloss.NewStyle().Background(t.Background()).Render(lipgloss.JoinVertical(lipgloss.Left, headerParts...))
+	if p.permission == nil {
+		return ""
+	}
+	
+	t := theme.CurrentTheme()
+	baseStyle := styles.NewStyle()
+
+	toolKey := baseStyle.Foreground(t.TextMuted()).Bold(true).Render("Tool")
+	toolValue := baseStyle.
+		Foreground(t.Text()).
+		Width(p.width - lipgloss.Width(toolKey)).
+		Render(fmt.Sprintf(": %s", p.permission.Properties.ID))
+
+	// Get path from metadata if available
+	pathKey := baseStyle.Foreground(t.TextMuted()).Bold(true).Render("Path")
+	pathValue := ""
+	if path, ok := p.permission.Properties.Metadata["path"].(string); ok {
+		pathValue = baseStyle.
+			Foreground(t.Text()).
+			Width(p.width - lipgloss.Width(pathKey)).
+			Render(fmt.Sprintf(": %s", path))
+	}
+
+	headerParts := []string{
+		lipgloss.JoinHorizontal(
+			lipgloss.Left,
+			toolKey,
+			toolValue,
+		),
+		baseStyle.Render(strings.Repeat(" ", p.width)),
+	}
+
+	if pathValue != "" {
+		headerParts = append(headerParts,
+			lipgloss.JoinHorizontal(
+				lipgloss.Left,
+				pathKey,
+				pathValue,
+			),
+			baseStyle.Render(strings.Repeat(" ", p.width)),
+		)
+	}
+
+	// Add tool-specific header information
+	switch p.permission.Properties.ID {
+	case "bash":
+		headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("Command"))
+	case "edit":
+		headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("Diff"))
+	case "write":
+		headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("Diff"))
+	case "fetch":
+		headerParts = append(headerParts, baseStyle.Foreground(t.TextMuted()).Width(p.width).Bold(true).Render("URL"))
+	}
+
+	return lipgloss.NewStyle().Background(t.Background()).Render(lipgloss.JoinVertical(lipgloss.Left, headerParts...))
 }
 
 func (p *permissionDialogComponent) renderBashContent() string {
-	// t := theme.CurrentTheme()
-	// baseStyle := styles.BaseStyle()
-	//
-	// if pr, ok := p.permission.Params.(tools.BashPermissionsParams); ok {
-	// 	content := fmt.Sprintf("```bash\n%s\n```", pr.Command)
-	//
-	// 	// Use the cache for markdown rendering
-	// 	renderedContent := p.GetOrSetMarkdown(p.permission.ID, func() (string, error) {
-	// 		r := styles.GetMarkdownRenderer(p.width - 10)
-	// 		s, err := r.Render(content)
-	//    return s
-	// 	})
-	//
-	// 	finalContent := baseStyle.
-	// 		Width(p.contentViewPort.Width).
-	// 		Render(renderedContent)
-	// 	p.contentViewPort.SetContent(finalContent)
-	// 	return p.styleViewport()
-	// }
+	if p.permission == nil {
+		return ""
+	}
+	
+	t := theme.CurrentTheme()
+	baseStyle := styles.NewStyle()
+
+	if cmd, ok := p.permission.Properties.Metadata["command"].(string); ok {
+		content := fmt.Sprintf("```bash\n%s\n```", cmd)
+
+		// Use the cache for markdown rendering
+		renderedContent := p.GetOrSetMarkdown(p.permission.Properties.ID, func() (string, error) {
+			r := styles.GetMarkdownRenderer(p.width - 10, t.Background())
+			return r.Render(content)
+		})
+
+		finalContent := baseStyle.
+			Width(p.contentViewPort.Width()).
+			Render(renderedContent)
+		p.contentViewPort.SetContent(finalContent)
+		return p.styleViewport()
+	}
 	return ""
 }
 
 func (p *permissionDialogComponent) renderEditContent() string {
-	// if pr, ok := p.permission.Params.(tools.EditPermissionsParams); ok {
-	// 	diff := p.GetOrSetDiff(p.permission.ID, func() (string, error) {
-	// 		return diff.FormatDiff(pr.Diff, diff.WithTotalWidth(p.contentViewPort.Width))
-	// 	})
-	//
-	// 	p.contentViewPort.SetContent(diff)
-	// 	return p.styleViewport()
-	// }
+	if p.permission == nil {
+		return ""
+	}
+	
+	if diffData, ok := p.permission.Properties.Metadata["diff"].(string); ok {
+		diff := p.GetOrSetDiff(p.permission.Properties.ID, func() (string, error) {
+			return diffData, nil
+		})
+
+		p.contentViewPort.SetContent(diff)
+		return p.styleViewport()
+	}
 	return ""
 }
 
 func (p *permissionDialogComponent) renderPatchContent() string {
-	// if pr, ok := p.permission.Params.(tools.EditPermissionsParams); ok {
-	// 	diff := p.GetOrSetDiff(p.permission.ID, func() (string, error) {
-	// 		return diff.FormatDiff(pr.Diff, diff.WithTotalWidth(p.contentViewPort.Width))
-	// 	})
-	//
-	// 	p.contentViewPort.SetContent(diff)
-	// 	return p.styleViewport()
-	// }
+	if p.permission == nil {
+		return ""
+	}
+	
+	if diffData, ok := p.permission.Properties.Metadata["diff"].(string); ok {
+		diff := p.GetOrSetDiff(p.permission.Properties.ID, func() (string, error) {
+			return diffData, nil
+		})
+
+		p.contentViewPort.SetContent(diff)
+		return p.styleViewport()
+	}
 	return ""
 }
 
 func (p *permissionDialogComponent) renderWriteContent() string {
-	// if pr, ok := p.permission.Params.(tools.WritePermissionsParams); ok {
-	// 	// Use the cache for diff rendering
-	// 	diff := p.GetOrSetDiff(p.permission.ID, func() (string, error) {
-	// 		return diff.FormatDiff(pr.Diff, diff.WithTotalWidth(p.contentViewPort.Width))
-	// 	})
-	//
-	// 	p.contentViewPort.SetContent(diff)
-	// 	return p.styleViewport()
-	// }
+	if p.permission == nil {
+		return ""
+	}
+	
+	if diffData, ok := p.permission.Properties.Metadata["diff"].(string); ok {
+		diff := p.GetOrSetDiff(p.permission.Properties.ID, func() (string, error) {
+			return diffData, nil
+		})
+
+		p.contentViewPort.SetContent(diff)
+		return p.styleViewport()
+	}
 	return ""
 }
 
 func (p *permissionDialogComponent) renderFetchContent() string {
-	// 	t := theme.CurrentTheme()
-	// 	baseStyle := styles.BaseStyle()
-	//
-	// 	if pr, ok := p.permission.Params.(tools.FetchPermissionsParams); ok {
-	// 		content := fmt.Sprintf("```bash\n%s\n```", pr.URL)
-	//
-	// 		// Use the cache for markdown rendering
-	// 		renderedContent := p.GetOrSetMarkdown(p.permission.ID, func() (string, error) {
-	// 			r := styles.GetMarkdownRenderer(p.width - 10)
-	// 			s, err := r.Render(content)
-	//      return s
-	// 		})
-	//
-	// 		finalContent := baseStyle.
-	// 			Width(p.contentViewPort.Width).
-	// 			Render(renderedContent)
-	// 		p.contentViewPort.SetContent(finalContent)
-	// 		return p.styleViewport()
-	// 	}
+	if p.permission == nil {
+		return ""
+	}
+	
+	t := theme.CurrentTheme()
+	baseStyle := styles.NewStyle()
+
+	if url, ok := p.permission.Properties.Metadata["url"].(string); ok {
+		content := fmt.Sprintf("```\n%s\n```", url)
+
+		// Use the cache for markdown rendering
+		renderedContent := p.GetOrSetMarkdown(p.permission.Properties.ID, func() (string, error) {
+			r := styles.GetMarkdownRenderer(p.width - 10, t.Background())
+			return r.Render(content)
+		})
+
+		finalContent := baseStyle.
+			Width(p.contentViewPort.Width()).
+			Render(renderedContent)
+		p.contentViewPort.SetContent(finalContent)
+		return p.styleViewport()
+	}
 	return ""
 }
 
 func (p *permissionDialogComponent) renderDefaultContent() string {
-	// 	t := theme.CurrentTheme()
-	// 	baseStyle := styles.BaseStyle()
-	//
-	// 	content := p.permission.Description
-	//
-	// 	// Use the cache for markdown rendering
-	// 	renderedContent := p.GetOrSetMarkdown(p.permission.ID, func() (string, error) {
-	// 		r := styles.GetMarkdownRenderer(p.width - 10)
-	// 		s, err := r.Render(content)
-	//    return s
-	// 	})
-	//
-	// 	finalContent := baseStyle.
-	// 		Width(p.contentViewPort.Width).
-	// 		Render(renderedContent)
-	// 	p.contentViewPort.SetContent(finalContent)
-	//
-	// 	if renderedContent == "" {
-	// 		return ""
-	// 	}
-	//
+	if p.permission == nil {
+		return ""
+	}
+	
+	t := theme.CurrentTheme()
+	baseStyle := styles.NewStyle()
+
+	content := p.permission.Properties.Title
+
+	// Use the cache for markdown rendering
+	renderedContent := p.GetOrSetMarkdown(p.permission.Properties.ID, func() (string, error) {
+		r := styles.GetMarkdownRenderer(p.width - 10, t.Background())
+		return r.Render(content)
+	})
+
+	finalContent := baseStyle.
+		Width(p.contentViewPort.Width()).
+		Render(renderedContent)
+	p.contentViewPort.SetContent(finalContent)
+
+	if renderedContent == "" {
+		return ""
+	}
+
 	return p.styleViewport()
 }
 
@@ -361,95 +387,97 @@ func (p *permissionDialogComponent) styleViewport() string {
 }
 
 func (p *permissionDialogComponent) render() string {
-	return "NOT IMPLEMENTED"
-	// t := theme.CurrentTheme()
-	// baseStyle := styles.BaseStyle()
-	//
-	// title := baseStyle.
-	// 	Bold(true).
-	// 	Width(p.width - 4).
-	// 	Foreground(t.Primary()).
-	// 	Render("Permission Required")
-	// // Render header
-	// headerContent := p.renderHeader()
-	// // Render buttons
-	// buttons := p.renderButtons()
-	//
-	// // Calculate content height dynamically based on window size
-	// p.contentViewPort.Height = p.height - lipgloss.Height(headerContent) - lipgloss.Height(buttons) - 2 - lipgloss.Height(title)
-	// p.contentViewPort.Width = p.width - 4
-	//
-	// // Render content based on tool type
-	// var contentFinal string
-	// switch p.permission.ToolName {
-	// case "bash":
-	// 	contentFinal = p.renderBashContent()
-	// case "edit":
-	// 	contentFinal = p.renderEditContent()
-	// case "patch":
-	// 	contentFinal = p.renderPatchContent()
-	// case "write":
-	// 	contentFinal = p.renderWriteContent()
-	// case "fetch":
-	// 	contentFinal = p.renderFetchContent()
-	// default:
-	// 	contentFinal = p.renderDefaultContent()
-	// }
-	//
-	// content := lipgloss.JoinVertical(
-	// 	lipgloss.Top,
-	// 	title,
-	// 	baseStyle.Render(strings.Repeat(" ", lipgloss.Width(title))),
-	// 	headerContent,
-	// 	contentFinal,
-	// 	buttons,
-	// 	baseStyle.Render(strings.Repeat(" ", p.width-4)),
-	// )
-	//
-	// return baseStyle.
-	// 	Padding(1, 0, 0, 1).
-	// 	Border(lipgloss.RoundedBorder()).
-	// 	BorderBackground(t.Background()).
-	// 	BorderForeground(t.TextMuted()).
-	// 	Width(p.width).
-	// 	Height(p.height).
-	// 	Render(
-	// 		content,
-	// 	)
+	if p.width == 0 || p.height == 0 {
+		return ""
+	}
+
+	t := theme.CurrentTheme()
+	baseStyle := styles.NewStyle()
+
+	title := baseStyle.
+		Bold(true).
+		Width(p.width - 4).
+		Foreground(t.Primary()).
+		Render("Permission Required")
+	
+	// Render header
+	headerContent := p.renderHeader()
+	
+	// Render buttons
+	buttons := p.renderButtons()
+
+	// Calculate content height dynamically based on window size
+	p.contentViewPort.SetHeight(p.height - lipgloss.Height(headerContent) - lipgloss.Height(buttons) - 2 - lipgloss.Height(title))
+	p.contentViewPort.SetWidth(p.width - 4)
+
+	// Render content based on tool type
+	var contentFinal string
+	if p.permission != nil {
+		switch p.permission.Properties.ID {
+		case "bash":
+			contentFinal = p.renderBashContent()
+		case "edit":
+			contentFinal = p.renderEditContent()
+		case "patch":
+			contentFinal = p.renderPatchContent()
+		case "write":
+			contentFinal = p.renderWriteContent()
+		case "fetch":
+			contentFinal = p.renderFetchContent()
+		default:
+			contentFinal = p.renderDefaultContent()
+		}
+	}
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Top,
+		title,
+		baseStyle.Render(strings.Repeat(" ", lipgloss.Width(title))),
+		headerContent,
+		contentFinal,
+		buttons,
+		baseStyle.Render(strings.Repeat(" ", p.width-4)),
+	)
+
+	return baseStyle.
+		Padding(1, 0, 0, 1).
+		Border(lipgloss.RoundedBorder()).
+		BorderBackground(t.Background()).
+		BorderForeground(t.TextMuted()).
+		Width(p.width).
+		Height(p.height).
+		Render(content)
 }
+
 
 func (p *permissionDialogComponent) View() string {
 	return p.render()
 }
 
 func (p *permissionDialogComponent) SetSize() tea.Cmd {
-	// if p.permission.ID == "" {
-	// 	return nil
-	// }
-	// switch p.permission.ToolName {
-	// case "bash":
-	// 	p.width = int(float64(p.windowSize.Width) * 0.4)
-	// 	p.height = int(float64(p.windowSize.Height) * 0.3)
-	// case "edit":
-	// 	p.width = int(float64(p.windowSize.Width) * 0.8)
-	// 	p.height = int(float64(p.windowSize.Height) * 0.8)
-	// case "write":
-	// 	p.width = int(float64(p.windowSize.Width) * 0.8)
-	// 	p.height = int(float64(p.windowSize.Height) * 0.8)
-	// case "fetch":
-	// 	p.width = int(float64(p.windowSize.Width) * 0.4)
-	// 	p.height = int(float64(p.windowSize.Height) * 0.3)
-	// default:
-	// 	p.width = int(float64(p.windowSize.Width) * 0.7)
-	// 	p.height = int(float64(p.windowSize.Height) * 0.5)
-	// }
+	if p.windowSize.Width == 0 || p.windowSize.Height == 0 {
+		return nil
+	}
+
+	// Default dialog size
+	p.width = int(float64(p.windowSize.Width) * 0.6)
+	p.height = int(float64(p.windowSize.Height) * 0.3)
+
+	// Ensure minimum size
+	if p.width < 50 {
+		p.width = 50
+	}
+	if p.height < 10 {
+		p.height = 10
+	}
+
 	return nil
 }
 
-// func (p *permissionDialogCmp) SetPermissions(permission permission.PermissionRequest) tea.Cmd {
-// 	p.permission = permission
-// 	return p.SetSize()
-// }
+func (p *permissionDialogComponent) SetPermission(permission *opencode.EventListResponseEventPermissionUpdated) tea.Cmd {
+	p.permission = permission
+	return p.SetSize()
+}
 
 // Helper to get or set cached diff content
 func (c *permissionDialogComponent) GetOrSetDiff(key string, generator func() (string, error)) string {
@@ -485,7 +513,7 @@ func (c *permissionDialogComponent) GetOrSetMarkdown(key string, generator func(
 
 func NewPermissionDialogCmp() PermissionDialogComponent {
 	// Create viewport for content
-	contentViewport := viewport.New() // (0, 0)
+	contentViewport := viewport.New()
 
 	return &permissionDialogComponent{
 		contentViewPort: contentViewport,

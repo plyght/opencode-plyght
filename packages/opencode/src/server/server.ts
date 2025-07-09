@@ -305,6 +305,47 @@ export namespace Server {
         },
       )
       .post(
+        "/session/:id/permission/:permissionId/respond",
+        describeRoute({
+          description: "Respond to a permission request",
+          responses: {
+            200: {
+              description: "Permission response recorded",
+              content: {
+                "application/json": {
+                  schema: resolver(z.boolean()),
+                },
+              },
+            },
+            ...ERRORS,
+          },
+        }),
+        zValidator(
+          "param",
+          z.object({
+            id: z.string(),
+            permissionId: z.string(),
+          }),
+        ),
+        zValidator(
+          "json",
+          z.object({
+            response: z.enum(["once", "always", "reject", "always_directory", "always_session"]),
+          }),
+        ),
+        async (c) => {
+          const { id, permissionId } = c.req.valid("param")
+          const { response } = c.req.valid("json")
+          const { Permission } = await import("../permission")
+          await Permission.respond({
+            sessionID: id,
+            permissionID: permissionId,
+            response,
+          })
+          return c.json(true)
+        },
+      )
+      .post(
         "/session/:id/share",
         describeRoute({
           description: "Share a session",

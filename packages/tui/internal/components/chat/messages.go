@@ -240,6 +240,13 @@ func (m *messagesComponent) renderView(width int) {
 						key := m.cache.GenerateKey(casted.ID, p.Text, width, m.showToolDetails, m.selectedPart == m.partCount)
 						content, cached = m.cache.Get(key)
 						if !cached {
+							// Check if this is a permission message
+							isPermissionMessage := strings.HasPrefix(casted.ID, "permission-")
+							extraContent := ""
+							if isPermissionMessage {
+								extraContent = "\n\n" + m.renderPermissionButtons(width)
+							}
+							
 							content = renderText(
 								m.app,
 								message,
@@ -248,7 +255,7 @@ func (m *messagesComponent) renderView(width int) {
 								m.showToolDetails,
 								m.partCount == m.selectedPart,
 								width,
-								"",
+								extraContent,
 								toolCallParts...,
 							)
 							m.cache.Set(key, content)
@@ -512,3 +519,40 @@ func NewMessagesComponent(app *app.App) MessagesComponent {
 		selectedPart:    -1,
 	}
 }
+
+func (m *messagesComponent) renderPermissionButtons(width int) string {
+	t := theme.CurrentTheme()
+	
+	// Create styled buttons that match the theme
+	yesStyle := styles.NewStyle().
+		Foreground(t.Primary()).
+		Bold(true).
+		Render("Y")
+	
+	directoryStyle := styles.NewStyle().
+		Foreground(t.Secondary()).
+		Bold(true).
+		Render("D")
+	
+	noStyle := styles.NewStyle().
+		Foreground(t.Error()).
+		Bold(true).
+		Render("N")
+	
+	// Create option text
+	option1 := yesStyle + " " + styles.NewStyle().Foreground(t.Text()).Render("Yes")
+	option2 := directoryStyle + " " + styles.NewStyle().Foreground(t.Text()).Render("Yes, don't ask again in this directory")
+	option3 := noStyle + " " + styles.NewStyle().Foreground(t.Text()).Render("No, tell OpenCode what to do differently")
+	
+	// Join options with bullet points
+	optionsText := "• " + option1 + "\n• " + option2 + "\n• " + option3
+	
+	// Add instruction text
+	instructionText := styles.NewStyle().
+		Foreground(t.TextMuted()).
+		Italic(true).
+		Render("Choose an option by pressing the highlighted letter or 'Esc' to deny.")
+	
+	return optionsText + "\n\n" + instructionText
+}
+

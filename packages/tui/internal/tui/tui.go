@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -67,6 +71,9 @@ type appModel struct {
 	fileProvider         dialog.CompletionProvider
 	showCompletionDialog bool
 	fileCompletionActive bool
+	permissionDialog     dialog.PermissionDialogComponent
+	showPermissionDialog bool
+	currentPermission    *opencode.EventListResponseEventPermissionUpdated
 	leaderBinding        *key.Binding
 	isLeaderSequence     bool
 	toastManager         *toast.ToastManager
@@ -227,6 +234,18 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 
 			return a, tea.Sequence(cmds...)
+		}
+
+		// Handle permission responses
+		if a.showPermissionDialog {
+			switch keyString {
+			case "y":
+				return a, util.CmdHandler(dialog.PermissionResponseMsg{Action: dialog.PermissionAllow})
+			case "d":
+				return a, util.CmdHandler(dialog.PermissionResponseMsg{Action: dialog.PermissionAllowDirectory})
+			case "n", "esc":
+				return a, util.CmdHandler(dialog.PermissionResponseMsg{Action: dialog.PermissionDeny})
+			}
 		}
 
 		if a.showCompletionDialog {
@@ -392,6 +411,44 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"opencode updated to "+msg.Properties.Version+", restart to apply.",
 			toast.WithTitle("New version installed"),
 		)
+	case opencode.EventListResponseEventPermissionUpdated:
+		// Show permission as inline chat message
+		a.currentPermission = &msg
+		a.showPermissionDialog = true
+		
+		// Create a fake assistant message for the permission request
+		permissionMessage := opencode.AssistantMessage{
+			ID:         "permission-" + msg.Properties.ID,
+			SessionID:  msg.Properties.SessionID,
+			Role:       opencode.AssistantMessageRoleAssistant,
+			ModelID:    a.app.State.Model,
+			Cost:       0.0,
+			ProviderID: "permission",
+			System:     []string{},
+			Time: opencode.AssistantMessageTime{
+				Created:   msg.Properties.Time.Created,
+				Completed: msg.Properties.Time.Created, // Mark as completed so it renders immediately
+			},
+			Parts: []opencode.AssistantMessagePart{
+				{
+					Type: opencode.AssistantMessagePartTypeText,
+					Text: a.formatPermissionText(msg.Properties),
+				},
+			},
+			Tokens: opencode.AssistantMessageTokens{},
+			Path:   opencode.AssistantMessagePath{},
+		}
+		
+		// Add the permission message to the message list
+		a.app.Messages = append(a.app.Messages, permissionMessage)
+		
+		// Force messages component to re-render and scroll to bottom
+		a.messages.SetWidth(a.width)
+		cmds = append(cmds, util.CmdHandler(app.OptimisticMessageAddedMsg{
+			Message: permissionMessage,
+		}))
+		
+		return a, tea.Batch(cmds...)
 	case opencode.EventListResponseEventSessionDeleted:
 		if a.app.Session != nil && msg.Properties.Info.ID == a.app.Session.ID {
 			a.app.Session = &opencode.Session{}
@@ -465,6 +522,12 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		msg.Height -= 2 // Make space for the status bar
 		a.width, a.height = msg.Width, msg.Height
+		
+		// Update permission dialog size
+		if a.showPermissionDialog {
+			_, cmd := a.permissionDialog.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 		container := min(a.width, 84)
 		if a.fileViewer.HasFile() {
 			if a.width < fileViewerFullWidthCutoff {
@@ -519,6 +582,54 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dialog.ThemeSelectedMsg:
 		a.app.State.Theme = msg.ThemeName
 		a.app.SaveState()
+	case dialog.PermissionResponseMsg:
+		// Hide permission dialog
+		a.showPermissionDialog = false
+		
+		if a.currentPermission != nil {
+			// Map dialog actions to API responses
+			var response string
+			switch msg.Action {
+			case dialog.PermissionAllow:
+				response = "once"
+			case dialog.PermissionAllowDirectory:
+				response = "always_directory"
+			case dialog.PermissionAllowSession:
+				response = "always_session"
+			case dialog.PermissionDeny:
+				response = "reject"
+			}
+			
+			// Remove the permission message from chat
+			permissionID := "permission-" + a.currentPermission.Properties.ID
+			for i, message := range a.app.Messages {
+				if assistantMsg, ok := message.(opencode.AssistantMessage); ok && assistantMsg.ID == permissionID {
+					// Remove the permission message
+					a.app.Messages = append(a.app.Messages[:i], a.app.Messages[i+1:]...)
+					// Force messages to re-render
+					a.messages.SetWidth(a.width)
+					break
+				}
+			}
+			
+			// Make HTTP call to respond to permission
+			go func() {
+				reqBody := map[string]interface{}{
+					"response": response,
+				}
+				jsonData, _ := json.Marshal(reqBody)
+				
+				url := fmt.Sprintf("http://localhost:3000/session/%s/permission/%s/respond", 
+					a.app.Session.ID, 
+					a.currentPermission.Properties.ID)
+				
+				http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+			}()
+			
+			// Clear current permission
+			a.currentPermission = nil
+		}
+		return a, nil
 	case toast.ShowToastMsg:
 		tm, cmd := a.toastManager.Update(msg)
 		a.toastManager = tm
@@ -560,6 +671,12 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if a.showCompletionDialog {
 		u, cmd := a.completions.Update(msg)
 		a.completions = u.(dialog.CompletionDialog)
+		cmds = append(cmds, cmd)
+	}
+
+	if a.showPermissionDialog {
+		u, cmd := a.permissionDialog.Update(msg)
+		a.permissionDialog = u.(dialog.PermissionDialogComponent)
 		cmds = append(cmds, cmd)
 	}
 
@@ -761,6 +878,7 @@ func (a appModel) home(width int) string {
 		)
 	}
 
+
 	return mainLayout
 }
 
@@ -798,6 +916,7 @@ func (a appModel) chat(width int) string {
 			mainLayout,
 		)
 	}
+
 
 	return mainLayout
 }
@@ -1023,6 +1142,42 @@ func (a appModel) executeCommand(command commands.Command) (tea.Model, tea.Cmd) 
 	return a, tea.Batch(cmds...)
 }
 
+func (a appModel) formatPermissionText(props opencode.EventListResponseEventPermissionUpdatedProperties) string {
+	var text string
+	
+	switch props.ID {
+	case "bash":
+		if cmd, ok := props.Metadata["command"].(string); ok {
+			if desc, ok := props.Metadata["description"].(string); ok {
+				text = fmt.Sprintf("I need permission to run this command:\n\n```bash\n%s\n```\n\n%s", cmd, desc)
+			} else {
+				text = fmt.Sprintf("I need permission to run this command:\n\n```bash\n%s\n```", cmd)
+			}
+		} else {
+			text = "I need permission to run a command."
+		}
+	case "edit", "write":
+		if path, ok := props.Metadata["path"].(string); ok {
+			text = fmt.Sprintf("I need permission to edit the file:\n\n**%s**", path)
+			if diff, ok := props.Metadata["diff"].(string); ok && diff != "" {
+				text += fmt.Sprintf("\n\nChanges:\n```diff\n%s\n```", diff)
+			}
+		} else {
+			text = "I need permission to edit a file."
+		}
+	case "fetch":
+		if url, ok := props.Metadata["url"].(string); ok {
+			text = fmt.Sprintf("I need permission to fetch content from:\n\n**%s**", url)
+		} else {
+			text = "I need permission to fetch external content."
+		}
+	default:
+		text = fmt.Sprintf("I need permission to perform this action: **%s**", props.Title)
+	}
+	
+	return text
+}
+
 func NewModel(app *app.App) tea.Model {
 	commandProvider := completions.NewCommandCompletionProvider(app)
 	fileProvider := completions.NewFileAndFolderContextGroup(app)
@@ -1030,6 +1185,7 @@ func NewModel(app *app.App) tea.Model {
 	messages := chat.NewMessagesComponent(app)
 	editor := chat.NewEditorComponent(app)
 	completions := dialog.NewCompletionDialogComponent(commandProvider)
+	permissionDialog := dialog.NewPermissionDialogCmp()
 
 	var leaderBinding *key.Binding
 	if app.Config.Keybinds.Leader != "" {
@@ -1049,6 +1205,8 @@ func NewModel(app *app.App) tea.Model {
 		isLeaderSequence:     false,
 		showCompletionDialog: false,
 		fileCompletionActive: false,
+		permissionDialog:     permissionDialog,
+		showPermissionDialog: false,
 		toastManager:         toast.NewToastManager(),
 		interruptKeyState:    InterruptKeyIdle,
 		exitKeyState:         ExitKeyIdle,

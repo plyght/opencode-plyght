@@ -119,6 +119,17 @@ export namespace Config {
         .describe("Custom provider configurations and model overrides"),
       mcp: z.record(z.string(), Mcp).optional().describe("MCP (Model Context Protocol) server configurations"),
       instructions: z.array(z.string()).optional().describe("Additional instruction files or patterns to include"),
+      permissions: z
+        .object({
+          directory_commands: z
+            .record(z.string(), z.record(z.string(), z.boolean()))
+            .optional()
+            .describe(
+              "Per-directory command permissions where keys are directory paths and values are command->boolean maps",
+            ),
+        })
+        .optional()
+        .describe("Permission settings for commands and file operations"),
       experimental: z
         .object({
           hook: z
